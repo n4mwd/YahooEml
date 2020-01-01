@@ -1,54 +1,64 @@
 
 #include "YahooEml.h"
 
-
-enum { ENC_7BIT=0, ENC_8BIT, ENC_BINARY, ENC_QP, ENC_BASE64, ENC_UNKNOWN};
-enum { CT_TEXT_PLAIN=0, CT_TEXT_HTML, CT_TEXT_UNKNOWN,
-       CT_MULTI_MIXED, CT_MULTI_ALT, CT_MULTI_RELATED, CT_MULTI_UNKNOWN,
-       CT_APPLICATION, CT_AUDIO, CT_IMAGE, CT_MESSAGE, CT_VIDEO,
-       CT_UNSUPPORTED=-1 };
-
-// macro to determine if this is a multipart mime type
-#define ISMULTIPART(x) ((x) >= CT_MULTI_MIXED && (x) <= CT_MULTI_UNKNOWN)
-
-// This structure stores a single mime record.
-// Null pointers mean object not found.
-
-typedef struct MIMEREC
+// Content type table - order must match enums
+static char const *ContTypeTbl[] =
 {
-    char    *BodyStart;     // Points to the start of the body after the headers.
-    char    *BodyEnd;       // Points to end of area defined by this mime node.
-                            // This is mostly the byte preceeding the "boundary--".
-                            // For the root node, this is the last byte in the file.
-    unsigned ContentType;   // "text/html", "multipart/mixed", etc.
-    char 	*Charset;       // "utf-8", "ISO-8859-1", etc. Part of content type.
-    char 	*Boundary;      // Boundary string also from content type.
-                            // this field describes the boundary string used for
-                            // child mime nodes.  It will be blank if there are
-                            // no children under it.
-    char 	*FileName;      // "image.jpg", etc form content disposition.
-    unsigned Encoding;    	// "7bit", "8bit", "binary", "quoted-printable", "base64"
-    unsigned SenderIp;    	// Ip address of sender
-    struct   MIMEREC *Child;// First child node
-    struct 	 MIMEREC *Next; // Next mime record at the same level
-} MIMEREC;
+    "", "text/plain", "text/html",
+    "multipart/mixed", "multipart/alternative", "multipart/related",
+    "application/zip","application/pdf","application/msword",
+    "audio/mpeg","audio/ogg","audio/mp3","audio/wav",
+    "image/png","image/jpeg","image/gif", "image/bmp",
+    "video/mp4","video/avi","video/mpeg",
+    NULL
+};
+
+// Content type table - order must match enums
+static char const *ContTypeTblMain[] =
+{
+    "text/", "multipart/", "application/", "audio/",
+    "image/", "video/", "message/", NULL
+};
+
+char const *GetContTypeStr(int EnumVal)
+{
+    static char RetBuf[20];  // used in special cases
+
+    if (EnumVal >= CT_UNSPECIFIED && EnumVal <= CT_VIDEO_MPEG)
+        return(ContTypeTbl[EnumVal]);        // well known content type
+
+    if (EnumVal >= CT_TEXT_UNKNOWN && EnumVal <= CT_MESSAGE_UNKNOWN)
+    {
+        strcpy(RetBuf, ContTypeTblMain[EnumVal - CT_TEXT_UNKNOWN]);
+        strcat(RetBuf, "unknown");
+        return(RetBuf);
+    }
+
+    return(NULL);   // Not a defined content type enum
+}
 
 
 
-// Get the next header line as a null terminated string.
+// Return a pointer to a line.
 // Parameter Str points to the start of the line and will be used for
 // further processing.
-// Parameter EndPtr is set to the start of the next line and will be used
-// for the next call as the Str parameter.
-// The IsHeader parameter is TRUE if the line is a header.
+//
+// If IsHeader is true, null terminates the Str at the newline then return
+// the number of characters in the line.
+// If IsHeader is false, do not modify input Str and return TRUE if Str
+// Points to a valid string (not null terminated).
+//
+// On Exit, Parameter EndPtr is set to the start of the next line and will be
+// used for the next call as the Str parameter.
+//
 // CR's are converted to spaces and LF's are converted to nulls.  However,
 // if the line is being processed as a header line, and the next line starts
 // with a space, the previous Lf is instead changed to a space so the line
 // appears as one long line.  This is folding white space which is allowed in
 // headers.
+//
 // Returns number of chars in line not counting CR or LF's.
-// If EndPtr is returned NULL, then an unexpected EOF was detected, however
-// this does not mean the HdrStr value is invalid.
+// On EOF, returns -1 and Str is invalid.
 
 
 int GetEmailLine(char *Str, char **EndPtr, int IsHeader)
@@ -58,26 +68,34 @@ int GetEmailLine(char *Str, char **EndPtr, int IsHeader)
 
     if (!Str || !EndPtr) return(0);
 
+//if (memcmp(Str, "X-Rocket-Track:", 15) == 0)
+//printf("");
+
     while (LineChars < 1024)
     {
         ch = *Str;
+//printf("%c", ch);
         if (ch == 0) //  end of email
         {
-            *EndPtr = NULL;     // signal error
-            return(NumChars);
+            if (NumChars == 0) return(-1);  // EOF
+            else
+            {
+                *EndPtr = Str;     // signal error point to null char
+                return(NumChars);
+            }
         }
         else if (ch == '\r') *Str = ' ';  // Convert returns to spaces
         else if (ch == '\n')   // newline
         {
             LineChars = 0;
-            if (IsHeader && (Str[1] == ' ' || Str[1] == '\t'))  // folding white space
+            if (IsHeader && NumChars && (Str[1] == ' ' || Str[1] == '\t'))  // folding white space
             {
                 *Str = ' ';     // remove LF
                 Str[1] = ' ';  // Force FWS to be a space
             }
             else   // end of line
             {
-                *Str = 0;    // null terminate
+                if (IsHeader) *Str = 0;    // null terminate only for header
                 *EndPtr = Str + 1;
                 return(NumChars);
             }
@@ -91,8 +109,19 @@ int GetEmailLine(char *Str, char **EndPtr, int IsHeader)
         Str++;
     }
 
-    *EndPtr = NULL;
-    return(0);
+    printf("Illegal line length in %s, skipping to next line.\n>%.20s\n",
+            IsHeader ? "header" : "body", *EndPtr);
+
+    *EndPtr = strchr(Str, '\n');
+    if (IsHeader) *Str = 0;    // null terminate only for header
+    if (!*EndPtr) return(-1);     // EOF
+
+    (*EndPtr)++;    // go past \n
+    LineChars = *EndPtr - Str;
+    NumChars += LineChars;
+
+    return(NumChars);
+
 }
 
 
@@ -207,14 +236,13 @@ void ParseRecievedHeader(char *Params[], int ParamCnt, MIMEREC *MimeRec)
 
 void ParseHeaderString(char *Hdr, MIMEREC *MimeRec)
 {
-//return;
-#if 1
-    char *ptr, *ptr2, *HdrName, *Params[10];
+    char *ptr, *ptr2, *HdrName, *Params[10], ch;
     int i, t, ParamCnt = 0;
 
 
     HdrName = strtok(Hdr, ": ");
-
+//if (strcmpi(HdrName, "Content-Transfer-Encoding") == 0)
+//printf("");
     // Get the next 10 paramters in the table.
     memset(Params, 0, sizeof(Params));
     while (ParamCnt < (sizeof(Params) / sizeof(Params[0])) &&
@@ -226,29 +254,23 @@ void ParseHeaderString(char *Hdr, MIMEREC *MimeRec)
     // look for headers we are interested in
     if (strcmpi(HdrName, "Content-Type") == 0)   // Found Content-Type
     {
-        // the type should be the first parameter
-        ptr = strtok(Params[0], " /");     // Ex: "multipart"
-        ptr2 = strtok(NULL, " ");          // Ex: "mixed"
-
-        if (strcmpi(ptr, "multipart") == 0)
+        // get content type
+        t = CT_UNSPECIFIED;
+        ptr = Params[0];
+        for (i = 1; ContTypeTbl[i]; i++)
         {
-            t = CT_MULTI_UNKNOWN;
-            if (strcmpi(ptr2, "mixed") == 0) t = CT_MULTI_MIXED;
-            else if (strcmpi(ptr2, "alternative") == 0) t = CT_MULTI_ALT;
-            else if (strcmpi(ptr2, "related") == 0) t = CT_MULTI_RELATED;
+            if (strcmpi(ptr, ContTypeTbl[i]) == 0)
+                t = i;
+        }
 
-        }
-        else if (strcmpi(ptr, "text") == 0)
+        if (t == CT_UNSPECIFIED)  // wasn't found
         {
-            t = CT_TEXT_UNKNOWN;
-            if (strcmpi(ptr2, "plain") == 0) t = CT_TEXT_PLAIN;
-            else if (strcmpi(ptr2, "html") == 0) t = CT_TEXT_HTML;
+            for (i = 0; ContTypeTblMain[i]; i++)
+            {
+                if (memicmp(ptr, ContTypeTblMain[i], strlen(ContTypeTblMain[i])) == 0)
+                    t = i + CT_TEXT_UNKNOWN;
+            }
         }
-        else if (strcmpi(ptr, "application") == 0) t = CT_APPLICATION;
-        else if (strcmpi(ptr, "audio") == 0) t = CT_AUDIO;
-        else if (strcmpi(ptr, "image") == 0) t = CT_IMAGE;
-        else if (strcmpi(ptr, "message") == 0) t = CT_MESSAGE;
-        else if (strcmpi(ptr, "video") == 0) t = CT_VIDEO;
 
         MimeRec->ContentType = t;
 
@@ -281,7 +303,17 @@ void ParseHeaderString(char *Hdr, MIMEREC *MimeRec)
         {
             if (strncmpi(Params[i], "filename=", 9) == 0)
             {
-                MimeRec->FileName = Params[i] + 9;
+                ptr = Params[i] + 9;   // src ptr
+                ptr2 = ptr;            // dst ptr
+                MimeRec->FileName = ptr;
+
+                // remove quotes
+                while ((ch = *ptr++) != NULL)
+                {
+                    if (ch != '"')
+                        *ptr2++ = ch;
+                }
+                *ptr2 = 0;
                 break;
             }
         }
@@ -293,10 +325,21 @@ void ParseHeaderString(char *Hdr, MIMEREC *MimeRec)
         ParseRecievedHeader(Params, ParamCnt, MimeRec);
     }
 
+    else if (strcmpi(HdrName, "To") == 0)
+    {
+        // Stitch email parts back together
+//        int x;
+
+//        for (x = 1; x < ParamCnt; x++)
+//        {
+//            Params[x - 1][strlen(Params[x - 1])] = ' ';
+//        }
+ //       printf("%s\n", Params[0]);
+        MimeRec->To = Params[0];
+    }
+
     // All other headers are ignored
     
-#endif
-
 }
 
 
@@ -314,20 +357,19 @@ char *ParseHeaders(char *Buf, MIMEREC *MimeRec)
 
     while (Buf)
     {
-if (memcmp(Buf, "From:", 5) ==0)
-printf("");
         rt = GetEmailLine(Buf, &NextHdr, TRUE);
-        if (rt == 0)
-            return(NextHdr);    // return if blank line
+        if (rt == 0) return(NextHdr);    // return if blank line
+        else if (rt == -1) break;   // EOF
 
+//printf("[%s]\n", Buf);   // debug
         // If here, Buf should point top the header string that we need to process
-printf("[%s]\n", Buf);
         ParseHeaderString(Buf, MimeRec);
+
 
         Buf = NextHdr;
     }
 
-    // Buf is NULL if here.  This meads there was an unexpected EOF.
+    // Buf is NULL if here.  This means there was an unexpected EOF.
 
     return(NULL);
 
@@ -366,6 +408,8 @@ MIMEREC *FindBoundaryNode(char *Buf, MIMEREC *MimeRoot)
             if (Tmp) return(Tmp);
         }
 
+        MimeRoot = MimeRoot->Next;
+
     }
 
     return(NULL);    // Not found
@@ -375,7 +419,7 @@ MIMEREC *FindBoundaryNode(char *Buf, MIMEREC *MimeRoot)
 // Given a parent Node, find the last child currently in the list.
 // Return NULL if there are no children.
 
-MIMEREC *FindLastNode(MIMEREC *Root)
+MIMEREC *FindLastChild(MIMEREC *Root)
 {
     if (!Root || !Root->Child) return(NULL);
     Root = Root->Child;
@@ -412,10 +456,14 @@ MIMEREC *SearchBoundary(char *Buf, MIMEREC *MimeRoot)
     if (!Parent) return(NULL);   // Not found
 
     // Find last child or NULL
-    LastChild = FindLastNode(Parent);
+    LastChild = FindLastChild(Parent);
 
-    // Set BodyEnd of last child to point to byte prior to the previous CR-LF
-    if (LastChild) LastChild->BodyEnd = Buf - 2;
+    // Null terminate last child at byte prior to the previous CR-LF
+    if (LastChild)
+    {
+        *(Buf-2) = 0;  // null terminate last child
+        LastChild->BodyLen = strlen(LastChild->BodyStart);
+    }    
 
     // now determine if this boundary string a terminal boundary
     // If so, no further processing is done.
@@ -431,8 +479,17 @@ MIMEREC *SearchBoundary(char *Buf, MIMEREC *MimeRoot)
         return(NULL);
     }
     memset(Tmp, 0, sizeof(MIMEREC));
-    if (LastChild) LastChild->Next = Tmp;
-    else Parent->Child = Tmp;
+    if (LastChild)    // other children already exist
+    {
+        LastChild->Next = Tmp;
+    }
+    else    // This is the first child
+    {
+        Parent->Child = Tmp;
+    }
+    Tmp->Prev = LastChild;
+    Tmp->Parent = Parent;
+    Tmp->Encoding = Parent->Encoding;   // inherit default encoding from parent
 
     // New node has been created
     // Return a pointer to the new, but empty, node.
@@ -440,82 +497,57 @@ MIMEREC *SearchBoundary(char *Buf, MIMEREC *MimeRoot)
 }
 
 
-void ProcessNonMulti(MIMEREC *MimeRec)
+void FreeMimePartList(MIMEREC *MimeRec)
 {
-    if (MimeRec) return;
-}
+    MIMEREC *ptr;
 
-
-void testparseheaderfunc(char *ptr, MIMEREC *MimeRec)
-{
-	int Len;
-    char *endptr;
-    MIMEREC *TempRec;
-    char *encodings[] = {"default", "7bit", "8bit", "binary", "quoted-printable", "base64"};
-    char *ct[] =
+    while (MimeRec)
     {
-        "unsupported",
-        "multipart-unknown", "multipart-mixed", "multipart-alternative", "multipart-related",
-    	"text-unknown", "text-plain", "text-html",
-    	"application", "audio", "image", "message", "video"
-    };
+        // Children First
+        if (MimeRec->Child) FreeMimePartList(MimeRec->Child);
 
-    printf("Content-Type: %s\n", MimeRec->ContentType < 14 ? ct[MimeRec->ContentType] : "Invalid Encoding");
-    printf("Charset: %s\n", MimeRec->Charset ? MimeRec->Charset : "Unknown");
-    printf("Boundary: %s\n", MimeRec->Boundary ? MimeRec->Boundary : "Not Speciofied");
-    printf("FileName: %s\n", MimeRec->FileName ? MimeRec->FileName : "Not Specified");
-    printf("Encoding: %s\n", MimeRec->Encoding < 6 ? encodings[MimeRec->Encoding] : "Invalid encoding");
-    printf("SenderIP: %u.%u.%u.%u\n", MimeRec->SenderIp >> 24,
-        (MimeRec->SenderIp >> 16) & 0xFF,
-        (MimeRec->SenderIp >> 8) & 0xFF,
-        MimeRec->SenderIp & 0xFF);
-
-    printf("\n\n\n");
-
-    endptr = NULL;
-    while (1)
-    {
-        Len = GetEmailLine(ptr, &endptr, FALSE);
-        if (!endptr) break;
-
-        TempRec = SearchBoundary(ptr, MimeRec);
-
-        if (TempRec)   // found boundary
-        {
-            printf("\n\n***FOUND BOUNDARY: %s\n\n", TempRec->Boundary);
-        }
-        else printf("%d:%s\n", Len,ptr);
-
-        ptr = endptr;
+        // Free this node then move to next sibling
+        ptr = MimeRec->Next;
+        free(MimeRec);
+        MimeRec = ptr;
     }
-
 }
+
 
 // Parse the data pointed to by Buf as an email.
 // Buf is a null terminated buffer with an email in it.
 
-void ParseEmail(char *Buf)
+MIMEREC *ParseEmail(char *Buf)
 {
-    MIMEREC MimeRec, *TmpRec;
+    MIMEREC *MimeRec;
+    MIMEREC *TmpRec; //, *LastTmpRec;
     char *ptr, *endptr;
+    int rt;
 
-    memset(&MimeRec, 0, sizeof(MimeRec));
-    ptr = ParseHeaders(Buf, &MimeRec);
+    // Create top node
+    MimeRec = malloc(sizeof(MIMEREC));
+    if (!MimeRec)   // not enough memory
+    {
+        printf("Insuffient memory to add new MIME node.\n");
+        return(NULL);
+    }
+    memset(MimeRec, 0, sizeof(MIMEREC));
+
+    ptr = ParseHeaders(Buf, MimeRec);
     if (!ptr)
     {
-         printf("Parse Error.\n");
-         return;
+         printf("Parse Error while parsing email headers.\n");
+         free(MimeRec);
+         return(NULL);
     }
 
     // If here, ptr should point to the blank line after the headers.
-    GetEmailLine(ptr, &ptr, FALSE);  // get blank line
-    MimeRec.BodyStart = ptr;
-    MimeRec.BodyEnd = MimeRec.BodyStart + strlen(MimeRec.BodyStart);
+    MimeRec->BodyStart = ptr;
+    MimeRec->BodyLen = strlen(ptr);
 
-    if (!ISMULTIPART(MimeRec.ContentType))   // Not a multipart-mime
+    if (!ISMULTIPART(MimeRec->ContentType))   // Not a multipart-mime
     {
-        ProcessNonMulti(&MimeRec);
-        return;
+        return(MimeRec);
     }
 
     // If here, we must process a multipart type email
@@ -523,11 +555,11 @@ void ParseEmail(char *Buf)
     while (1)
     {
         // Get a null terminated line
-        GetEmailLine(ptr, &endptr, FALSE);
-        if (!endptr) break;   // end of buffer reached or error
+        rt = GetEmailLine(ptr, &endptr, FALSE);
+        if (rt == -1) break;   // end of buffer reached or error
 
         // check for boundaries
-        TmpRec = SearchBoundary(ptr, &MimeRec);
+        TmpRec = SearchBoundary(ptr, MimeRec);
         if (TmpRec)   // found new non-terminal boundary
         {
             // TempRec is the new empty Mime node
@@ -535,12 +567,10 @@ void ParseEmail(char *Buf)
             ptr = ParseHeaders(endptr, TmpRec);
             if (!ptr)
             {
-        		printf("Parse Error.\n");
-         		return;
+        		printf("Parse Error while parsing Mime headers.\n");
+         		return(NULL);
     		}
 
-            // ptr should point to the blank line after the headers.
-            GetEmailLine(ptr, &ptr, FALSE);  // get blank line
             TmpRec->BodyStart = ptr;
             endptr = ptr;    // endptr must point to start of next line
         }
@@ -548,6 +578,10 @@ void ParseEmail(char *Buf)
         // Just go to next line
         ptr = endptr;
     }
+
+//    if (LastTmpRec->BodyEnd == 0)
+//        LastTmpRec->BodyEnd = MimeRec->BodyEnd;
+    return(MimeRec);
 }
 
 
@@ -558,150 +592,6 @@ void ParseEmail(char *Buf)
 #if 0
 
 X-eGroups-Remote-IP: 66.218.66.71
-
-// Parse the headers.  Save values for
-//MIME-Version: 1.0
-//Content-Type: multipart/alternative;
-//  boundary="----=_Part_223176_1800133257.1505487319309"
-//Content-Type: text/plain; charset=utf-8; format=flowed
-//Content-Transfer-Encoding: 8bit
-//--------------26D1C33446561D3F6AF764BC
-//Content-Type: text/html; charset=utf-8
-//Content-Transfer-Encoding: 8bit
-//Content-Type: text/plain; charset="ISO-8859-1"
-//Content-Transfer-Encoding: quoted-printable
-
-
-    application
-    audio
-    font
-    example
-    image
-    message
-    model
-    multipart
-    text
-    video
-
-    application/zip
-    application/pdf
-    application/msword
-
-    audio/mpeg
-    audio/ogg
-    audio/mp3
-
-    multipart/mixed
-    multipart/alternative
-
-    text/css
-    text/html
-    text/xml
-    text/csv
-    text/plain
-
-    image/png
-    image/jpeg
-    image/gif
-
-    video/mp4
-
-Content-Disposition:
-disposition := "Content-Disposition" ":"
-                    disposition-type
-                    *(";" disposition-parm)
-
-     disposition-type := "inline"
-                       / "attachment"
-                       / extension-token
-                       ; values are not case-sensitive
-
-     disposition-parm := filename-parm
-                       / creation-date-parm
-                       / modification-date-parm
-                       / read-date-parm
-                       / size-parm
-                       / parameter
-
-     filename-parm := "filename" "=" value
-
-     creation-date-parm := "creation-date" "=" quoted-date-time
-
-     modification-date-parm := "modification-date" "=" quoted-date-time
-
-     read-date-parm := "read-date" "=" quoted-date-time
-
-     size-parm := "size" "=" 1*DIGIT
-
-     quoted-date-time := quoted-string
-                      ; contents MUST be an RFC 822 `date-time'
-                      ; numeric timezones (+HHMM or -HHMM) MUST be used
-
-=============
-
-5.1.  Syntax of the Content-Type Header Field
-
-   In the Augmented BNF notation of RFC 822, a Content-Type header field
-   value is defined as follows:
-
-     content := "Content-Type" ":" type "/" subtype
-                *(";" parameter)
-                ; Matching of media type and subtype
-                ; is ALWAYS case-insensitive.
-
-     type := discrete-type / composite-type
-
-     discrete-type := "text" / "image" / "audio" / "video" /
-                      "application" / extension-token
-
-     composite-type := "message" / "multipart" / extension-token
-
-     extension-token := ietf-token / x-token
-
-     ietf-token := <An extension token defined by a
-                    standards-track RFC and registered
-                    with IANA.>
-
-     x-token := <The two characters "X-" or "x-" followed, with
-                 no intervening white space, by any token>
-
-     subtype := extension-token / iana-token
-
-     iana-token := <A publicly-defined extension token. Tokens
-                    of this form must be registered with IANA
-                    as specified in RFC 2048.>
-
-     parameter := attribute "=" value
-
-     attribute := token
-                  ; Matching of attributes
-                  ; is ALWAYS case-insensitive.
-
-     value := token / quoted-string
-
-     token := 1*<any (US-ASCII) CHAR except SPACE, CTLs,
-                 or tspecials>
-
-     tspecials :=  "(" / ")" / "<" / ">" / "@" /
-                   "," / ";" / ":" / "\" / <">
-                   "/" / "[" / "]" / "?" / "="
-                   ; Must be in quoted-string,
-                   ; to use within parameter values
-
-==========
-
-6.1.  Content-Transfer-Encoding Syntax
-
-   The Content-Transfer-Encoding field's value is a single token
-   specifying the type of encoding, as enumerated below.  Formally:
-
-     encoding := "Content-Transfer-Encoding" ":" mechanism
-
-     mechanism := "7bit" / "8bit" / "binary" /
-                  "quoted-printable" / "base64" /
-                  ietf-token / x-token
-
-======================
 
 
 For formalists, the syntax of quoted-printable data is described by
@@ -743,60 +633,6 @@ For formalists, the syntax of quoted-printable data is described by
    IMPORTANT:  The addition of LWSP between the elements shown in this
    BNF is NOT allowed since this BNF does not specify a structured
    header field.
-
-
-====================
-
-8.  Content-Description Header Field
-
-   The ability to associate some descriptive information with a given
-   body is often desirable.  For example, it may be useful to mark an
-   "image" body as "a picture of the Space Shuttle Endeavor."  Such text
-   may be placed in the Content-Description header field.  This header
-   field is always optional.
-
-     description := "Content-Description" ":" *text
-
-   The description is presumed to be given in the US-ASCII character
-   set, although the mechanism specified in RFC 2047 may be used for
-   non-US-ASCII Content-Description values.
-
-
-==============
-
-
-
-
-The syntax of a boundary is:
-
-     boundary := 0*69<bchars> bcharsnospace
-     bchars := bcharsnospace / " "
-     bcharsnospace := DIGIT / ALPHA / "'" / "(" / ")" /
-                      "+" / "_" / "," / "-" / "." /
-                      "/" / ":" / "=" / "?"
-
-And the body of a multipart entity has the syntax (only the important parts):
-
-     multipart-body := [preamble CRLF]
-                       dash-boundary transport-padding CRLF
-                       body-part *encapsulation
-                       close-delimiter transport-padding
-                       [CRLF epilogue]
-     dash-boundary := "--" boundary
-     encapsulation := delimiter transport-padding
-                      CRLF body-part
-     delimiter := CRLF dash-boundary
-     close-delimiter := delimiter "--"
-
-The preceeding -- is mandatory for every boundary used in the message and the trailing -- is mandatory for the closing boundary (close-delimiter). So a multipart body with three body-parts with boundary as boundary can look like this:
-
---boundary
-1. body-part
---boundary
-2. body-part
---boundary
-3. body-part
---boundary--
 
 
 

@@ -146,6 +146,138 @@ int ParseJson(JSONHEADERS *jhdr, char *Buf, int BufLen)
 
 
 
+// Read file into a malloc()ed buffer.
+// On return, BufLen is the file length
+// On error, return NULL and set BufLen to error code.
+// BufLen == 0 if file could not be opened, 1 = if no memory
+
+char *ReadJsonFile(char *FileName, unsigned *BufLen)
+{
+    FILE *fp;
+    unsigned size;
+    char *Buf;
+
+    fp = fopen(FileName, "rb"); //binary mode
+    if (fp == NULL)
+    {
+        if (BufLen) *BufLen = 0;
+        return(NULL);
+    }
+
+    if (fseek(fp, 0, SEEK_END))
+    {
+        fclose(fp);
+        if (BufLen) *BufLen = 0;
+        return(NULL);
+    }
+
+    size = ftell(fp);
+    Buf = malloc(size + 128);
+    if (!Buf)
+    {
+        fclose(fp);
+        if (BufLen) *BufLen = 1;
+        return(NULL);
+    }
+
+    fseek(fp, 0, SEEK_SET);   // rewind
+
+    fread(Buf, 1, size, fp);
+
+    fclose(fp);
+    *BufLen = size;
+
+    return(Buf);
+}
+
+
+
+
+
+void ProcessJson(int MsgNum, int EmlMode, char *DirName)
+{
+    char *Buf;
+    char Tmpstr[256];
+    unsigned BufLen;
+    JSONHEADERS jhdr;
+    char *ptr;
+
+
+    // Fabricate file name and read file
+    sprintf(Tmpstr, "%s/%d_raw.json", DirName, MsgNum);
+    Buf = ReadJsonFile(Tmpstr, &BufLen);
+    if (Buf == NULL) return;     // Quietly return if file not found
+
+    // Parse JSON file into record of keys and data.
+    if (ParseJson(&jhdr, Buf, BufLen))
+        printf("Error processing JSON file: %s\n", Tmpstr);
+
+    printf("Message Number: %d\n", jhdr.MsgNum);
+    jhdr.DirName = DirName;
+
+    ptr = jhdr.RawEmail;
+    if (ptr)
+    {
+        FILE *fp;
+        MIMEREC *MimeRec;
+        int NewLen;
+
+        NewLen = UnEscapeString(ptr);
+        if (EmlMode == RAWEML)   // just output the raw email
+        {
+            sprintf(Tmpstr, "%s/eml/%d_raw.eml", DirName, MsgNum);
+            fp = fopen(Tmpstr, "wb");
+            if (fp)
+            {
+                fwrite(ptr, NewLen, 1, fp);
+                fclose(fp);
+            }
+
+        }
+        else    // Output has to be processed
+        {
+			MimeRec = ParseEmail(ptr);
+            if (!MimeRec) return;
+
+            if (EmlMode == COMPACTEML)
+            {
+                // output as compact .eml and re-attach attachments
+                sprintf(Tmpstr, "%s/eml/%d.eml", DirName, MsgNum);
+                fp = fopen(Tmpstr, "wb");
+                if (fp)
+                {
+                    WriteCompactEml(&jhdr, MimeRec, fp);
+                    fclose(fp);
+                }
+
+            }
+            else if (EmlMode == BBEML)
+            {
+                // Output as BBCode file (.bb) with attachments
+                sprintf(Tmpstr, "%s/eml/%d.bb", DirName, MsgNum);
+                fp = fopen(Tmpstr, "wb");
+                if (fp)
+                {
+                    WriteBBCode(&jhdr, MimeRec, fp);
+                    fclose(fp);
+                }
+            }
+            else if (EmlMode == XMLEML)
+            {
+                // Output single XML file (.xml) as BBCode and all attachments
+            }
+
+            // Free the mime part list
+            FreeMimePartList(MimeRec);
+
+    	}
+    }
+
+    free(Buf);
+}
+
+
+
 
 
 

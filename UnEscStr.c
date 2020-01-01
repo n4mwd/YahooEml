@@ -79,16 +79,17 @@ char *HtmlEscTable[] =
 
 int UnEscapeString(char *Buf)
 {
-    int sIdx, dIdx;
+    char *sptr, *dptr;
     unsigned x;
     char ch, *endptr;
 
-
-    for (sIdx = dIdx = 0; (ch = Buf[sIdx++]) != 0; )
+    if (!Buf) return(0);
+    
+    for (sptr = dptr = Buf; (ch = *sptr++) != 0; )
     {
         if (ch == '\\')   // C style escape sequence
         {
-            ch = Buf[sIdx++];   // escape char
+            ch = *sptr++;   // get actual escape char
 
             // is it one of the common ones?
             for (x = 0; C_escTable[x][0]; x++)
@@ -99,110 +100,87 @@ int UnEscapeString(char *Buf)
             if (C_escTable[x][0])
             {
                 // found one
-                Buf[dIdx++] = C_escTable[x][1];
+                *dptr++ = C_escTable[x][1];
                 continue;
             }
 
             // Not one of the common most ones
+            endptr = NULL;
             if (ch == 'x')
             {
-                x = strtoul(&Buf[sIdx], &endptr, 16);
-
+                x = strtoul(sptr, &endptr, 16);
             }
-            else if (ch >= '0' && ch <= '8')   // octal
+            else if (ch >= '0' && ch <= '7')   // octal
             {
                 // sIdx has already been incremented to the 2nd char
-                x = strtoul(&Buf[sIdx - 1], &endptr, 8);
-
-            }
-            else   // unsupported escape char - just store as is
-            {
-                Buf[dIdx++] = '\\';
-                Buf[dIdx++] = ch;
-                continue;
+                x = strtoul(sptr - 1, &endptr, 8);
             }
 
-            // either octal or hex if here
-            sIdx = endptr - Buf;   // point to the char that stoppped the scan
-
-            // we can't en-escape a zero so re-escape that if necessary
+            // we can't un-escape a zero so re-escape that if necessary
             x &= 0xFF;
-            if (x == 0)
-            {
-                Buf[dIdx++] = '\\';
-                Buf[dIdx++] = '0';
-                continue;
-            }
 
-            Buf[dIdx++] = (char) x;   // save numeric escape char
-            continue;
+            if (x && endptr)
+            {
+	            // either octal or hex if here
+    	        sptr = endptr;    // point to the char that stoppped the scan
+	            *dptr++ = (char) x;   // save numeric escape char
+            }
+            else     // unsupported escape char - just store as is
+            {
+                *dptr++ = '\\';
+                *dptr++ = ch;
+            }
+   	        continue;
 
         }   // if() \\
         else if (ch == '&')   // HTML style sequence
         {
-            char tmpstr[16];
-
-            // copy suspected escape sequence into string
-            for (x = 0; x < (sizeof(tmpstr) - 1); x++)
+            // First, Check for &#nnnn; (decimal) or   &#xhhhh; (hex).
+            if (*sptr == '#')  // yes it is
             {
-                ch = Buf[sIdx++];
-                tmpstr[x] = ch;
-                if (ch == ';')
+                ch = *(sptr + 1);  // get 1st char after '#'
+                if (ch == 'x' || ch == 'X')   // hex version
+                    x = strtoul(sptr + 2, &endptr, 16);
+                else x = strtoul(sptr + 1, &endptr, 10);
+
+                if (*endptr == ';' && x != 0)   // we don't decode a zero
                 {
-                    x++;
-                    break;
+                    *dptr++ = (char) (x & 0xFF);
+                    sptr = endptr + 1;
+                    continue;
                 }
             }
-            tmpstr[x] = 0;   // null terminate
 
+            // If here, we could not decode a '#' escape code
             // check for standard HTML escape sequences
+
             for (x = 0; HtmlEscTable[x]; x++)
             {
-                if (strcmp(tmpstr, HtmlEscTable[x] + 1) == 0) break;
+                if (memicmp(sptr, HtmlEscTable[x] + 1, strlen(HtmlEscTable[x] + 1)) == 0) break;
             }
 
             if (HtmlEscTable[x])
             {
                 // found one
-                Buf[dIdx++] = HtmlEscTable[x][0];
+                *dptr++ = HtmlEscTable[x][0];
+                sptr += strlen(HtmlEscTable[x] + 1);
                 continue;
-            }
-            
-            // if here, it wasn't in the table but could still be a numberic
-            // sequence  Check for &#nnnn; (decimal) or   &#xhhhh; (hex).
-
-            if (tmpstr[0] == '#')  // yes it is
-            {
-                if (tmpstr[1] == 'x' || tmpstr[1] == 'X')
-                    x = strtoul(&tmpstr[2], NULL, 16);
-                else x = strtoul(&tmpstr[1], NULL, 10);
-
-                if (x != 0)   // we don't decode a zero
-                {
-                    Buf[dIdx++] = (char) (x & 0xFF);
-                    continue;
-                }
             }
 
             // We didn't recognize the escape sequence so just leave it as is
-            Buf[dIdx++] = '&';
-            for (x = 0; tmpstr[x]; x++)
-            {
-                Buf[dIdx++] = tmpstr[x];
-            }
-
+            *dptr++ = '&';
             continue;
         }
         else     // not a recognized escape sequence
         {
             // just copy as is
-            Buf[dIdx++] = ch;
+            *dptr++ = ch;
         }
     }
 
-    Buf[dIdx] = 0;
-    
-    return(dIdx);
+    *dptr = 0;   // null terminate
+
+    return(strlen(Buf));
 }
 
 
